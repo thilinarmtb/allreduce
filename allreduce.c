@@ -140,18 +140,21 @@ static inline void ar_setup(all_reduce_t *reduce_, MPI_Comm comm) {
       fprintf(stderr, "Error: %lf != %d\n", sum, reduce->size);
       exit(1);
     }
+
+    double tdiff = te - ts, tavg = 0;
+    MPI_Allreduce(&tdiff, &tavg, 1, MPI_DOUBLE, MPI_SUM, reduce->comm);
+    tavg /= reduce->size;
+
     if (reduce->rank == 0)
-      printf("Time for %zu: %lf\n", j, (te - ts) / num_trials);
+      printf("Time for %zu: %lf\n", j, tavg / num_trials);
     fflush(stdout), fflush(stderr);
 
     // Update the minimum time and method
-    if ((te - ts) < tmin) {
-      tmin           = te - ts;
+    if (tavg < tmin) {
+      tmin           = tavg;
       reduce->reduce = reductions[j];
     }
   }
-
-  return;
 }
 
 static inline void ar_finalize(all_reduce_t *reduce) {
