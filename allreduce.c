@@ -8,15 +8,17 @@ typedef struct all_reduce_t_ *all_reduce_t;
 typedef void (*all_reduce_impl_t)(const void *, void *, all_reduce_t);
 
 struct all_reduce_t_ {
-  MPI_Comm          comm;
+  MPI_Comm          comm, inter_node_comm, intra_node_comm;
   int               size, rank;
+  int               inter_node_rank, inter_node_size;
+  int               node_leader;
   all_reduce_impl_t reduce;
 };
 
 static all_reduce_t reduce_ = 0;
 
-static void ar_malloc_(void **ptr, size_t size, const char *file,
-                       unsigned line) {
+static inline void ar_malloc_(void **ptr, size_t size, const char *file,
+                              unsigned line) {
   *ptr = malloc(sizeof(*ptr) * size);
   if (ptr) return;
   fprintf(stderr, "ar_malloc failed at %s:%d\n", file, line);
@@ -26,17 +28,15 @@ static void ar_malloc_(void **ptr, size_t size, const char *file,
 #define ar_malloc(ptr, size)                                           \
   ar_malloc_((void **)(ptr), size, __FILE__, __LINE__)
 
-static void ar_free_(void **ptr) {
+static inline void ar_free_(void **ptr) {
   if (*ptr) free(*ptr);
   *ptr = NULL;
 }
 
 #define ar_free(ptr) ar_free_((void **)(ptr))
 
-static void binary_fifo(const void *sendbuf, void *recvbuf,
-                        all_reduce_t reduce) {
-  int rank = reduce->rank, size = reduce->size;
-
+static inline void binary_fifo_impl(const void *sendbuf, void *recvbuf,
+                                    int rank, int size, MPI_Comm comm) {
   MPI_Request req;
   MPI_Status  status;
   int         offset   = size / 2;
@@ -46,13 +46,12 @@ static void binary_fifo(const void *sendbuf, void *recvbuf,
     if (rank < offset) {
       // Receive from rank + offset
       double data;
-      MPI_Irecv(&data, 1, MPI_DOUBLE, rank + offset, 0, reduce->comm,
-                &req);
+      MPI_Irecv(&data, 1, MPI_DOUBLE, rank + offset, 0, comm, &req);
       MPI_Wait(&req, &status);
       *((double *)recvbuf) += data;
     } else if (rank < 2 * offset) {
       // Send to rank - offset
-      MPI_Send(recvbuf, 1, MPI_DOUBLE, rank - offset, 0, reduce->comm);
+      MPI_Send(recvbuf, 1, MPI_DOUBLE, rank - offset, 0, comm);
     }
     offset /= 2;
   }
@@ -61,36 +60,72 @@ static void binary_fifo(const void *sendbuf, void *recvbuf,
   while (offset <= size / 2) {
     if (rank < offset) {
       // Send to rank + offset
-      MPI_Send(recvbuf, 1, MPI_DOUBLE, rank + offset, 0, reduce->comm);
+      MPI_Send(recvbuf, 1, MPI_DOUBLE, rank + offset, 0, comm);
     } else if (rank < 2 * offset) {
       // receive from rank - offset
-      MPI_Irecv(recvbuf, 1, MPI_DOUBLE, rank - offset, 0, reduce->comm,
-                &req);
+      MPI_Irecv(recvbuf, 1, MPI_DOUBLE, rank - offset, 0, comm, &req);
       MPI_Wait(&req, &status);
     }
     offset *= 2;
   }
 }
 
-static void mpi_allreduce(const void *sendbuf, void *recvbuf,
-                          all_reduce_t reduce) {
+static inline void binary_fifo(const void *sendbuf, void *recvbuf,
+                               all_reduce_t reduce) {
+  binary_fifo_impl(sendbuf, recvbuf, reduce->rank, reduce->size,
+                   reduce->comm);
+}
+
+static inline void binary_fifo_v2(const void *sendbuf, void *recvbuf,
+                                  all_reduce_t reduce) {
+  // Inter-node reduction:
+  MPI_Allreduce(sendbuf, recvbuf, 1, MPI_DOUBLE, MPI_SUM,
+                reduce->intra_node_comm);
+
+  // Intra-node reduction:
+  int partial = *((double *)recvbuf);
+  binary_fifo_impl(&partial, recvbuf, reduce->inter_node_rank,
+                   reduce->inter_node_size, reduce->inter_node_comm);
+  MPI_Barrier(reduce->comm);
+
+  // Broadcast within the node:
+  MPI_Bcast(recvbuf, 1, MPI_DOUBLE, reduce->node_leader,
+            reduce->intra_node_comm);
+}
+
+static inline void mpi_allreduce(const void *sendbuf, void *recvbuf,
+                                 all_reduce_t reduce) {
   MPI_Allreduce(sendbuf, recvbuf, 1, MPI_DOUBLE, MPI_SUM, reduce->comm);
 }
 
-static void ar_setup(all_reduce_t *reduce_, MPI_Comm comm) {
+static inline void ar_setup(all_reduce_t *reduce_, MPI_Comm comm) {
   ar_malloc(reduce_, 1);
   all_reduce_t reduce = *reduce_;
 
-  MPI_Comm_size(comm, &reduce->size);
-  MPI_Comm_rank(comm, &reduce->rank);
   MPI_Comm_dup(comm, &reduce->comm);
+  MPI_Comm_size(reduce->comm, &reduce->size);
+  MPI_Comm_rank(reduce->comm, &reduce->rank);
 
-  all_reduce_impl_t reductions[] = {&mpi_allreduce, &binary_fifo};
+  // Create the intra_node_comm:
+  MPI_Comm_split_type(comm, MPI_COMM_TYPE_SHARED, reduce->rank,
+                      MPI_INFO_NULL, &reduce->intra_node_comm);
+  int node_rank;
+  MPI_Comm_rank(reduce->intra_node_comm, &node_rank);
+  reduce->node_leader = (node_rank == 0);
+
+  // Create the inter_node_comm:
+  MPI_Comm_split(comm, reduce->node_leader, reduce->rank,
+                 &reduce->inter_node_comm);
+  MPI_Comm_size(reduce->inter_node_comm, &reduce->inter_node_size);
+  MPI_Comm_rank(reduce->inter_node_comm, &reduce->inter_node_rank);
+
+  // Add all the reduction implementations:
+  all_reduce_impl_t reductions[] = {&mpi_allreduce, &binary_fifo_v2};
   const size_t      num_reductions =
       sizeof(reductions) / sizeof(reductions[0]);
-  const size_t num_trials = 10000;
 
-  double tmin = DBL_MAX;
+  const size_t num_trials = 10000;
+  double       tmin       = DBL_MAX;
   for (size_t j = 0; j < num_reductions; j++) {
     double sum = 0, input = 1;
 
@@ -121,9 +156,11 @@ static void ar_setup(all_reduce_t *reduce_, MPI_Comm comm) {
   return;
 }
 
-static void ar_finalize(all_reduce_t *reduce) {
+static inline void ar_finalize(all_reduce_t *reduce) {
   MPI_Barrier((*reduce)->comm);
   MPI_Comm_free(&(*reduce)->comm);
+  MPI_Comm_free(&(*reduce)->intra_node_comm);
+  MPI_Comm_free(&(*reduce)->inter_node_comm);
   ar_free(reduce);
 }
 
