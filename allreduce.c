@@ -19,14 +19,14 @@ static all_reduce_t reduce_ = 0;
 
 static inline void ar_malloc_(void **ptr, size_t size, const char *file,
                               unsigned line) {
-  *ptr = malloc(sizeof(*ptr) * size);
+  *ptr = malloc(size);
   if (ptr) return;
   fprintf(stderr, "ar_malloc failed at %s:%d\n", file, line);
   exit(1);
 }
 
 #define ar_malloc(ptr, size)                                           \
-  ar_malloc_((void **)(ptr), size, __FILE__, __LINE__)
+  ar_malloc_((void **)ptr, sizeof(**(ptr)) * (size), __FILE__, __LINE__)
 
 static inline void ar_free_(void **ptr) {
   if (*ptr) free(*ptr);
@@ -114,7 +114,7 @@ static inline void ar_setup(all_reduce_t *reduce_, MPI_Comm comm) {
   reduce->node_leader = (node_rank == 0);
 
   // Create the inter_node_comm:
-  MPI_Comm_split(comm, reduce->node_leader, reduce->rank,
+  MPI_Comm_split(comm, reduce->node_leader == 1, reduce->rank,
                  &reduce->inter_node_comm);
   MPI_Comm_size(reduce->inter_node_comm, &reduce->inter_node_size);
   MPI_Comm_rank(reduce->inter_node_comm, &reduce->inter_node_rank);
