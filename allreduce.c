@@ -78,19 +78,17 @@ static inline void binary_fifo(const void *sendbuf, void *recvbuf,
 
 static inline void binary_fifo_v2(const void *sendbuf, void *recvbuf,
                                   all_reduce_t reduce) {
-  // Inter-node reduction:
-  MPI_Allreduce(sendbuf, recvbuf, 1, MPI_DOUBLE, MPI_SUM,
-                reduce->intra_node_comm);
+  // Intra-node reduction:
+  MPI_Reduce(sendbuf, recvbuf, 1, MPI_DOUBLE, MPI_SUM, 0,
+             reduce->intra_node_comm);
 
   // Intra-node reduction:
-  int partial = *((double *)recvbuf);
+  double partial = *((double *)recvbuf);
   binary_fifo_impl(&partial, recvbuf, reduce->inter_node_rank,
                    reduce->inter_node_size, reduce->inter_node_comm);
-  MPI_Barrier(reduce->comm);
 
   // Broadcast within the node:
-  MPI_Bcast(recvbuf, 1, MPI_DOUBLE, reduce->node_leader,
-            reduce->intra_node_comm);
+  MPI_Bcast(recvbuf, 1, MPI_DOUBLE, 0, reduce->intra_node_comm);
 }
 
 static inline void mpi_allreduce(const void *sendbuf, void *recvbuf,
