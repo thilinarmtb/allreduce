@@ -11,7 +11,7 @@ struct all_reduce_t_ {
   MPI_Comm          comm, inter_node_comm, intra_node_comm;
   int               size, rank;
   int               inter_node_rank, inter_node_size;
-  int               node_leader;
+  int               intra_node_leader;
   all_reduce_impl_t reduce;
 };
 
@@ -82,12 +82,12 @@ static inline void binary_fifo_v2(const void *sendbuf, void *recvbuf,
   MPI_Reduce(sendbuf, recvbuf, 1, MPI_DOUBLE, MPI_SUM, 0,
              reduce->intra_node_comm);
 
-  // Intra-node reduction:
+  // Inter-node reduction:
   double partial = *((double *)recvbuf);
   binary_fifo_impl(&partial, recvbuf, reduce->inter_node_rank,
                    reduce->inter_node_size, reduce->inter_node_comm);
 
-  // Broadcast within the node:
+  // Intra-node broadcast:
   MPI_Bcast(recvbuf, 1, MPI_DOUBLE, 0, reduce->intra_node_comm);
 }
 
@@ -109,10 +109,10 @@ static inline void ar_setup(all_reduce_t *reduce_, MPI_Comm comm) {
                       MPI_INFO_NULL, &reduce->intra_node_comm);
   int node_rank;
   MPI_Comm_rank(reduce->intra_node_comm, &node_rank);
-  reduce->node_leader = (node_rank == 0);
+  reduce->intra_node_leader = (node_rank == 0);
 
   // Create the inter_node_comm:
-  MPI_Comm_split(comm, reduce->node_leader == 1, reduce->rank,
+  MPI_Comm_split(comm, reduce->intra_node_leader == 1, reduce->rank,
                  &reduce->inter_node_comm);
   MPI_Comm_size(reduce->inter_node_comm, &reduce->inter_node_size);
   MPI_Comm_rank(reduce->inter_node_comm, &reduce->inter_node_rank);
